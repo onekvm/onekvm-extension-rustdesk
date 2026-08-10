@@ -1,0 +1,17 @@
+# Cargo output
+/target/
+
+# Rendered/package output
+/manifest.json
+*.ipk
+*.ipks
+
+# Python tool caches
+__pycache__/
+*.py[cod]
+
+# Local editor and OS files
+.DS_Store
+*.swp
+*.swo
+*~

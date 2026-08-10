@@ -1,0 +1,81 @@
+{
+  "manifest_version": 1,
+  "id": "rustdesk",
+  "i18n": {
+    "default": {
+      "name": "RustDesk",
+      "description": "RustDesk ID, relay, and direct-IP access with H.264 passthrough and keyboard and pointer input."
+    },
+    "zh": {
+      "name": "RustDesk",
+      "description": "通过 RustDesk ID、中继或直连访问，支持 H.264 直通及键盘和指针输入。"
+    },
+    "zh-TW": {
+      "name": "RustDesk",
+      "description": "透過 RustDesk ID、中繼或直連存取，支援 H.264 直通及鍵盤和指標輸入。"
+    }
+  },
+  "version": "@VERSION@",
+  "api_version": 2,
+  "architecture": "@ARCH@",
+  "kind": "protocol",
+  "author": "OneKVM",
+  "homepage": "https://github.com/onekvm/onekvm-extension-rustdesk",
+  "entrypoint": "bin/onekvm-protocol-rustdesk",
+  "permissions": ["network"],
+  "capabilities": ["video.encoded", "hid"],
+  "video": {"settings": "all", "mode_select": ["h264", "h265"]},
+  "services": [{
+    "id": "server",
+    "i18n": {
+      "default": {"name": "RustDesk server", "description": "RustDesk ID, relay, and direct-IP remote access service."},
+      "zh": {"name": "RustDesk 服务", "description": "提供 RustDesk ID、中继和直连远程访问。"},
+      "zh-TW": {"name": "RustDesk 服務", "description": "提供 RustDesk ID、中繼和直連遠端存取。"}
+    }
+  }],
+  "icon": {"source": "custom", "path": "web/rustdesk.svg"},
+  "page": {
+    "title": "RustDesk",
+    "renderer": "layout",
+    "entrypoint": "web/page.json"
+  },
+  "lifecycle": {
+    "enable": ["bin/onekvm-protocol-rustdesk", "--lifecycle", "enable"],
+    "disable": ["bin/onekvm-protocol-rustdesk", "--lifecycle", "disable"]
+  },
+  "settings_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["rustdesk_id", "service_enabled", "listen_address", "port", "access_control_enabled", "password", "max_clients", "codec", "fps", "quality_factor", "bitrate_kbps", "initial_qp", "min_qp", "max_qp", "gop", "use_official_id_server", "rendezvous_server", "relay_server", "api_server", "server_key"],
+    "properties": {
+      "rustdesk_id": {"type": "string", "title": "RustDesk ID", "i18n": {"default": "RustDesk ID", "zh": "RustDesk ID", "zh-TW": "RustDesk ID"}, "default": "Generated on first service start", "maxLength": 64, "readOnly": true},
+      "service_enabled": {"type": "boolean", "title": "RustDesk server", "i18n": {"default": "RustDesk server", "zh": "RustDesk 服务", "zh-TW": "RustDesk 服務"}, "default": false},
+      "listen_address": {"type": "string", "title": "Bind interface", "i18n": {"default": "Bind interface", "zh": "绑定接口", "zh-TW": "綁定介面"}, "format": "network-address", "default": "0.0.0.0", "maxLength": 64},
+      "port": {"type": "integer", "title": "Direct-IP port", "i18n": {"default": "Direct-IP port", "zh": "直连端口", "zh-TW": "直連連接埠"}, "default": 21118, "minimum": 1, "maximum": 65535},
+      "access_control_enabled": {"type": "boolean", "title": "Require password", "i18n": {"default": "Require password", "zh": "启用密码鉴权", "zh-TW": "要求密碼"}, "default": false},
+      "password": {"type": "string", "title": "Password", "i18n": {"default": "Password", "zh": "密码", "zh-TW": "密碼"}, "format": "password", "default": "", "maxLength": 64, "enabled_when": {"field": "access_control_enabled", "equals": true}, "required_when": {"field": "access_control_enabled", "equals": true}},
+      "max_clients": {"type": "integer", "title": "Maximum clients", "i18n": {"default": "Maximum clients", "zh": "最大客户端数", "zh-TW": "最大用戶端數"}, "default": 1, "minimum": 1, "maximum": 8},
+      "codec": {"type": "string", "title": "Video mode", "i18n": {"default": "Video mode", "zh": "视频模式", "zh-TW": "視訊模式"}, "enum": ["h264", "h265"], "default": "h264"},
+      "fps": {"type": "integer", "title": "Frame rate", "i18n": {"default": "Frame rate", "zh": "帧率", "zh-TW": "影格率"}, "default": 60, "minimum": 1, "maximum": 60},
+      "quality_factor": {"type": "number", "title": "Quality budget", "i18n": {"default": "Quality budget", "zh": "画质预算", "zh-TW": "畫質預算"}, "default": 1.0, "minimum": 0.1, "maximum": 1.0},
+      "bitrate_kbps": {"type": "integer", "title": "Maximum bitrate (kbps)", "i18n": {"default": "Maximum bitrate (kbps)", "zh": "最大码率 (kbps)", "zh-TW": "最大位元率 (kbps)"}, "default": 0, "minimum": 0, "maximum": 10000},
+      "initial_qp": {"type": "integer", "title": "Initial QP", "i18n": {"default": "Initial QP", "zh": "初始 QP", "zh-TW": "初始 QP"}, "default": 0, "minimum": 0, "maximum": 51},
+      "min_qp": {"type": "integer", "title": "Minimum QP", "i18n": {"default": "Minimum QP", "zh": "最小 QP", "zh-TW": "最小 QP"}, "default": 0, "minimum": 0, "maximum": 51},
+      "max_qp": {"type": "integer", "title": "Maximum QP", "i18n": {"default": "Maximum QP", "zh": "最大 QP", "zh-TW": "最大 QP"}, "default": 0, "minimum": 0, "maximum": 51},
+      "gop": {"type": "integer", "title": "Keyframe interval", "i18n": {"default": "Keyframe interval", "zh": "关键帧间隔", "zh-TW": "關鍵影格間隔"}, "default": 0, "minimum": 0, "maximum": 600},
+      "use_official_id_server": {"type": "boolean", "title": "Use official ID server", "i18n": {"default": "Use official ID server", "zh": "使用官方 ID 服务器", "zh-TW": "使用官方 ID 伺服器"}, "default": false},
+      "rendezvous_server": {"type": "string", "title": "Custom ID server (hbbs)", "i18n": {"default": "Custom ID server (hbbs)", "zh": "自定义 ID 服务器 (hbbs)", "zh-TW": "自訂 ID 伺服器 (hbbs)"}, "default": "", "maxLength": 255, "enabled_when": {"field": "use_official_id_server", "equals": false}},
+      "relay_server": {"type": "string", "title": "Custom relay server (hbbr)", "i18n": {"default": "Custom relay server (hbbr)", "zh": "自定义中继服务器 (hbbr)", "zh-TW": "自訂中繼伺服器 (hbbr)"}, "default": "", "maxLength": 255, "enabled_when": {"field": "use_official_id_server", "equals": false}},
+      "api_server": {"type": "string", "title": "Custom API server", "i18n": {"default": "Custom API server", "zh": "自定义 API 服务器", "zh-TW": "自訂 API 伺服器"}, "default": "", "maxLength": 255, "enabled_when": {"field": "use_official_id_server", "equals": false}},
+      "server_key": {"type": "string", "title": "Custom server public key", "i18n": {"default": "Custom server public key", "zh": "自定义服务器公钥", "zh-TW": "自訂伺服器公開金鑰"}, "default": "", "maxLength": 255, "enabled_when": {"field": "use_official_id_server", "equals": false}}
+    }
+  },
+  "secret_fields": ["/password"],
+  "memory_budget": "8M",
+  "resource_limits": {"memory_max": "32M", "cpu_quota": "35%", "tasks_max": 16, "limit_nofile": 64},
+  "healthcheck": {
+    "type": "exec",
+    "command": ["bin/onekvm-protocol-rustdesk", "--health"],
+    "timeout_seconds": 5
+  }
+}

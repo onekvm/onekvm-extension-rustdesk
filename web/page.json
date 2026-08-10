@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "columns": 1,
+  "sections": [
+    {
+      "title": "Endpoint",
+      "i18n": {"default": "Endpoint", "zh": "端点", "zh-TW": "端點"},
+      "columns": 1,
+      "settings": ["rustdesk_id", "service_enabled", "listen_address", "port", "max_clients"]
+    },
+    {
+      "title": "Video",
+      "i18n": {"default": "Video", "zh": "视频", "zh-TW": "視訊"},
+      "columns": 1,
+      "settings": ["codec", "fps", "quality_factor", "bitrate_kbps", "initial_qp", "min_qp", "max_qp", "gop"]
+    },
+    {
+      "title": "Access control",
+      "i18n": {"default": "Access control", "zh": "访问控制", "zh-TW": "存取控制"},
+      "columns": 1,
+      "settings": ["access_control_enabled", "password"]
+    },
+    {
+      "title": "ID server",
+      "i18n": {"default": "ID server", "zh": "ID 服务器", "zh-TW": "ID 伺服器"},
+      "columns": 1,
+      "settings": ["use_official_id_server", "rendezvous_server", "relay_server", "api_server", "server_key"]
+    }
+  ]
+}
