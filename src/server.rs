@@ -324,7 +324,7 @@ pub(crate) async fn serve(
     let mut reader = FrameReader::new(reader, session_key.clone());
     let mut writer = FrameWriter::new(writer, session_key);
     let hash = Hash {
-        salt: random_string(16),
+        salt: rustdesk_identity.password_salt.clone(),
         challenge: random_string(6),
     };
     write_union(&mut writer, message::Union::Hash(hash.clone())).await?;

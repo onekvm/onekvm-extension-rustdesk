@@ -6,7 +6,7 @@ use std::{
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use ed25519_dalek::{Signer, SigningKey};
-use rand::RngCore;
+use rand::{distributions::Alphanumeric, Rng, RngCore};
 use serde::{Deserialize, Serialize};
 
 const IDENTITY_FILE: &str = "identity.json";
@@ -16,6 +16,7 @@ const SETTINGS_OUTPUT_FILE: &str = "settings-output.json";
 pub struct RustDeskIdentity {
     pub id: String,
     pub uuid: Vec<u8>,
+    pub password_salt: String,
     signing_key: SigningKey,
 }
 
@@ -24,6 +25,8 @@ struct StoredIdentity {
     id: String,
     uuid: String,
     signing_seed: String,
+    #[serde(default)]
+    password_salt: String,
 }
 
 impl RustDeskIdentity {
@@ -38,7 +41,14 @@ impl RustDeskIdentity {
         fs::create_dir_all(root)?;
         let path = root.join(IDENTITY_FILE);
         match fs::read(&path) {
-            Ok(data) => Self::decode(&data),
+            Ok(data) => {
+                let mut identity = Self::decode(&data)?;
+                if identity.password_salt.len() != 16 {
+                    identity.password_salt = random_password_salt();
+                    identity.store(&path)?;
+                }
+                Ok(identity)
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let identity = Self::generate();
                 identity.store(&path)?;
@@ -91,6 +101,7 @@ impl RustDeskIdentity {
         Self {
             id,
             uuid,
+            password_salt: random_password_salt(),
             signing_key: SigningKey::from_bytes(&seed),
         }
     }
@@ -125,6 +136,7 @@ impl RustDeskIdentity {
         Ok(Self {
             id: stored.id,
             uuid,
+            password_salt: stored.password_salt,
             signing_key: SigningKey::from_bytes(&seed),
         })
     }
@@ -134,11 +146,20 @@ impl RustDeskIdentity {
             id: self.id.clone(),
             uuid: STANDARD.encode(&self.uuid),
             signing_seed: STANDARD.encode(self.signing_key.to_bytes()),
+            password_salt: self.password_salt.clone(),
         };
         let data = serde_json::to_vec_pretty(&stored)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         write_file(path, &data, 0o600)
     }
+}
+
+fn random_password_salt() -> String {
+    rand::thread_rng()
+        .sample_iter(Alphanumeric)
+        .take(16)
+        .map(char::from)
+        .collect()
 }
 
 fn write_file(path: &Path, data: &[u8], mode: u32) -> io::Result<()> {
@@ -180,6 +201,8 @@ mod tests {
         assert_eq!(first.id, second.id);
         assert_eq!(first.uuid, second.uuid);
         assert_eq!(first.public_key(), second.public_key());
+        assert_eq!(first.password_salt, second.password_salt);
+        assert_eq!(first.password_salt.len(), 16);
 
         first.publish_settings_output_to(&root).unwrap();
         let output: serde_json::Value =

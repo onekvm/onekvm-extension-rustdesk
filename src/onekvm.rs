@@ -230,13 +230,17 @@ impl MediaSubscriber {
         } else {
             (None, None)
         };
-        Ok(Self {
+        let mut subscriber = Self {
             stream,
             ring,
             legacy_prefix,
             last_sequence: 0,
             waiting_for_keyframe: shared_ring,
-        })
+        };
+        if shared_ring {
+            let _ = subscriber.request_key_frame().await;
+        }
+        Ok(subscriber)
     }
 
     pub async fn read_frame(&mut self) -> io::Result<MediaFrame> {
@@ -251,13 +255,11 @@ impl MediaSubscriber {
             };
             if self.last_sequence != 0 && frame.sequence != self.last_sequence + 1 {
                 self.waiting_for_keyframe = true;
-                if !frame.keyframe {
-                    self.request_key_frame().await?;
-                }
             }
             self.last_sequence = frame.sequence;
             if self.waiting_for_keyframe {
                 if !frame.keyframe {
+                    let _ = self.request_key_frame().await;
                     continue;
                 }
                 self.waiting_for_keyframe = false;
