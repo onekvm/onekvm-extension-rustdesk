@@ -164,16 +164,36 @@ fn random_password_salt() -> String {
 
 fn write_file(path: &Path, data: &[u8], mode: u32) -> io::Result<()> {
     let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true).mode(mode);
-    let mut file = options.open(&temporary)?;
-    use std::io::Write as _;
-    file.write_all(data)?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(&temporary, path)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+    // A power loss can leave the PID-derived temporary file behind, and PIDs
+    // are routinely reused on this small system.  It is never shared with a
+    // live writer because each extension has only one managed service unit.
+    let _ = fs::remove_file(&temporary);
+    let result = (|| {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true).mode(mode);
+        let mut file = options.open(&temporary)?;
+        use std::io::Write as _;
+        file.write_all(data)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        drop(file);
+        match fs::rename(&temporary, path) {
+            Ok(()) => {}
+            // The persistent overlay used on NanoKVM does not replace an
+            // existing destination with rename(2).  Retry after unlinking it.
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                fs::remove_file(path)?;
+                fs::rename(&temporary, path)?;
+            }
+            Err(error) => return Err(error),
+        }
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+    })();
+    // Some overlay implementations report a successful rename while keeping
+    // the source visible.  Removing it is harmless after a normal rename and
+    // prevents persistent temporary files from accumulating.
+    let _ = fs::remove_file(temporary);
+    result
 }
 
 #[cfg(test)]
@@ -205,6 +225,10 @@ mod tests {
         assert_eq!(first.password_salt.len(), 16);
 
         first.publish_settings_output_to(&root).unwrap();
+        let stale = root.join(format!("settings-output.tmp-{}", std::process::id()));
+        std::fs::write(&stale, b"stale").unwrap();
+        first.publish_settings_output_to(&root).unwrap();
+        assert!(!stale.exists());
         let output: serde_json::Value =
             serde_json::from_slice(&std::fs::read(root.join("settings-output.json")).unwrap())
                 .unwrap();
