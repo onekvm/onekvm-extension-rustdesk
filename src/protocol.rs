@@ -369,14 +369,44 @@ pub enum ControlKey {
 
 #[derive(Clone, PartialEq, ProstMessage)]
 pub struct Message {
-    #[prost(oneof = "message::Union", tags = "3, 4, 5, 6, 7, 8, 9, 10, 15")]
+    #[prost(oneof = "message::Union", tags = "3, 4, 5, 6, 7, 8, 9, 10, 11, 15, 19")]
     pub union: Option<message::Union>,
+}
+
+#[derive(Clone, PartialEq, ProstMessage)]
+pub struct AudioFrame {
+    #[prost(bytes = "bytes", tag = "1")]
+    pub data: bytes::Bytes,
+}
+
+#[derive(Clone, PartialEq, ProstMessage)]
+pub struct AudioFormat {
+    #[prost(uint32, tag = "1")]
+    pub sample_rate: u32,
+    #[prost(uint32, tag = "2")]
+    pub channels: u32,
+}
+
+#[derive(Clone, PartialEq, ProstMessage)]
+pub struct Misc {
+    #[prost(oneof = "misc::Union", tags = "8")]
+    pub union: Option<misc::Union>,
+}
+
+pub mod misc {
+    use super::{AudioFormat, Oneof};
+
+    #[derive(Clone, PartialEq, Oneof)]
+    pub enum Union {
+        #[prost(message, tag = "8")]
+        AudioFormat(AudioFormat),
+    }
 }
 
 pub mod message {
     use super::{
-        Hash, KeyEvent, LoginRequest, LoginResponse, MouseEvent, Oneof, PublicKey, SignedId,
-        TestDelay, VideoFrame,
+        AudioFrame, Hash, KeyEvent, LoginRequest, LoginResponse, Misc, MouseEvent, Oneof,
+        PublicKey, SignedId, TestDelay, VideoFrame,
     };
 
     #[derive(Clone, PartialEq, Oneof)]
@@ -397,8 +427,12 @@ pub mod message {
         Hash(Hash),
         #[prost(message, tag = "10")]
         MouseEvent(MouseEvent),
+        #[prost(message, tag = "11")]
+        AudioFrame(AudioFrame),
         #[prost(message, tag = "15")]
         KeyEvent(KeyEvent),
+        #[prost(message, tag = "19")]
+        Misc(Misc),
     }
 }
 

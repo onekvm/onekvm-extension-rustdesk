@@ -82,6 +82,7 @@ pub enum Codec {
     H264,
     H265,
     Mjpeg,
+    Opus,
 }
 
 #[derive(Clone, Debug)]
@@ -130,6 +131,8 @@ struct Subscription<'a> {
     max_qp: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     gop: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     transport: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -214,6 +217,7 @@ impl MediaSubscriber {
             gop: (!metadata_only)
                 .then(|| profile.and_then(|value| (value.gop != 0).then_some(value.gop)))
                 .flatten(),
+            audio: (!metadata_only && video == "encoded").then_some("opus"),
             transport: shared_ring.then_some("shm-ring-v1"),
             client_ip: client.map(|value| value.ip),
             client_user: client.and_then(|value| value.user),
@@ -253,6 +257,9 @@ impl MediaSubscriber {
                 wait_for_ring(&self.stream, &ring).await?;
                 continue;
             };
+            if frame.codec == Codec::Opus {
+                return Ok(frame);
+            }
             if self.last_sequence != 0 && frame.sequence != self.last_sequence + 1 {
                 self.waiting_for_keyframe = true;
             }
@@ -547,12 +554,31 @@ fn take_next_frame(ring: Arc<SharedRing>) -> io::Result<Option<MediaFrame>> {
         let height = read_le_u16(bytes, selected_offset + 30)?;
         let codec = decode_codec(bytes[selected_offset + 32])?;
         let keyframe = bytes[selected_offset + 33] != 0;
-        if payload_size == 0 || payload_size > ring.slot_capacity || width == 0 || height == 0 {
+        if payload_size == 0
+            || payload_size > ring.slot_capacity
+            || (codec != Codec::Opus && (width == 0 || height == 0))
+        {
             state.store(RING_STATE_FREE, Ordering::Release);
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "invalid shared media ring frame",
             ));
+        }
+        if codec == Codec::Opus {
+            let payload = bytes[selected_offset + RING_SLOT_HEADER_LENGTH
+                ..selected_offset + RING_SLOT_HEADER_LENGTH + payload_size]
+                .to_vec();
+            state.store(RING_STATE_FREE, Ordering::Release);
+            return Ok(Some(MediaFrame {
+                sequence,
+                pts_usec,
+                duration_usec,
+                width,
+                height,
+                codec,
+                keyframe,
+                payload: Bytes::from(payload),
+            }));
         }
         let state = NonNull::from(state);
         let data = NonNull::new(unsafe {
@@ -623,6 +649,7 @@ fn decode_codec(value: u8) -> io::Result<Codec> {
         1 => Ok(Codec::H264),
         2 => Ok(Codec::H265),
         3 => Ok(Codec::Mjpeg),
+        4 => Ok(Codec::Opus),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid media codec",
@@ -659,6 +686,7 @@ where
         1 => Codec::H264,
         2 => Codec::H265,
         3 => Codec::Mjpeg,
+        4 => Codec::Opus,
         value => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -729,6 +757,7 @@ fn codec_name(codec: Codec) -> &'static str {
         Codec::H264 => "h264",
         Codec::H265 => "h265",
         Codec::Mjpeg => "mjpeg",
+        Codec::Opus => "opus",
     }
 }
 
@@ -822,5 +851,23 @@ mod tests {
         assert_eq!((frame.width, frame.height), (1920, 1080));
         assert!(frame.keyframe);
         assert_eq!(frame.duration_usec, 16_667);
+    }
+
+    #[tokio::test]
+    async fn parses_shared_opus_audio_frame() {
+        let (mut writer, mut reader) = duplex(1024);
+        let mut header = [0_u8; MEDIA_HEADER_LENGTH];
+        header[..4].copy_from_slice(b"OKVF");
+        header[4] = 1;
+        header[5] = 4;
+        header[24..28].copy_from_slice(&20_000_u32.to_be_bytes());
+        header[32..36].copy_from_slice(&3_u32.to_be_bytes());
+        writer.write_all(&header).await.unwrap();
+        writer.write_all(&[0xfc, 0x01, 0x02]).await.unwrap();
+        let frame = read_media_frame(&mut reader).await.unwrap();
+        assert_eq!(frame.codec, Codec::Opus);
+        assert_eq!((frame.width, frame.height), (0, 0));
+        assert_eq!(frame.duration_usec, 20_000);
+        assert_eq!(frame.payload.as_ref(), &[0xfc, 0x01, 0x02]);
     }
 }

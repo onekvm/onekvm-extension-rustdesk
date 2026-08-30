@@ -29,9 +29,10 @@ use crate::{
         self, ClientMetadata, Codec, HidClient, Identity, MediaFrame, MediaSubscriber, VideoInfo,
     },
     protocol::{
-        login_response, message, video_frame, DisplayInfo, EncodedVideoFrame, EncodedVideoFrames,
-        Features, Hash, IdPk, KeyEvent, LoginRequest, LoginResponse, Message, MouseEvent, PeerInfo,
-        SignedId, SupportedEncoding, VideoFrame,
+        login_response, message, misc, video_frame, AudioFormat, AudioFrame, DisplayInfo,
+        EncodedVideoFrame, EncodedVideoFrames, Features, Hash, IdPk, KeyEvent, LoginRequest,
+        LoginResponse, Message, Misc, MouseEvent, PeerInfo, SignedId, SupportedEncoding,
+        VideoFrame,
     },
     rendezvous,
 };
@@ -627,6 +628,7 @@ pub(crate) async fn serve(
     );
 
     let mut first_video_frame = true;
+    let mut sent_audio_format = false;
     let result = loop {
         tokio::select! {
             incoming = incoming_receiver.recv() => {
@@ -658,6 +660,33 @@ pub(crate) async fn serve(
                 };
                 let frame_codec = frame.codec;
                 let frame_length = frame.payload.len();
+                if frame_codec == Codec::Opus {
+                    if !sent_audio_format {
+                        if let Err(error) = write_union(
+                            &mut writer,
+                            message::Union::Misc(Misc {
+                                union: Some(misc::Union::AudioFormat(AudioFormat {
+                                    sample_rate: 48_000,
+                                    channels: opus_channels(&frame.payload),
+                                })),
+                            }),
+                        )
+                        .await
+                        {
+                            break Err(error);
+                        }
+                        sent_audio_format = true;
+                    }
+                    if let Err(error) = write_union(
+                        &mut writer,
+                        message::Union::AudioFrame(AudioFrame { data: frame.payload }),
+                    )
+                    .await
+                    {
+                        break Err(error);
+                    }
+                    continue;
+                }
                 let Some(video) = rustdesk_video_frame(frame) else {
                     continue;
                 };
@@ -741,7 +770,7 @@ fn client_supports_codec(login: &LoginRequest, codec: Codec) -> bool {
         Codec::H264 => supported.map_or(true, |ability| ability.ability_h264 > 0),
         // H.265 is optional and must be explicitly advertised by the client.
         Codec::H265 => supported.is_some_and(|ability| ability.ability_h265 > 0),
-        Codec::Mjpeg => false,
+        Codec::Mjpeg | Codec::Opus => false,
     }
 }
 
@@ -750,6 +779,14 @@ fn codec_name(codec: Codec) -> &'static str {
         Codec::H264 => "H.264",
         Codec::H265 => "H.265",
         Codec::Mjpeg => "MJPEG",
+        Codec::Opus => "Opus",
+    }
+}
+
+fn opus_channels(payload: &[u8]) -> u32 {
+    match payload.first() {
+        Some(toc) if toc & 0x04 != 0 => 2,
+        _ => 1,
     }
 }
 
@@ -767,7 +804,7 @@ fn rustdesk_video_frame(frame: MediaFrame) -> Option<VideoFrame> {
     let union = match frame.codec {
         Codec::H264 => video_frame::Union::H264s(frames),
         Codec::H265 => video_frame::Union::H265s(frames),
-        Codec::Mjpeg => return None,
+        Codec::Mjpeg | Codec::Opus => return None,
     };
     Some(VideoFrame {
         union: Some(union),
@@ -909,14 +946,14 @@ mod tests {
         identity::RustDeskIdentity,
         onekvm::{Codec, Identity, MediaFrame, VideoInfo},
         protocol::{
-            login_response, message, Hash, LoginRequest, LoginResponse, Message, MouseEvent,
-            OptionMessage, SupportedDecoding, TestDelay,
+            login_response, message, misc, AudioFormat, Hash, LoginRequest, LoginResponse, Message,
+            Misc, MouseEvent, OptionMessage, SupportedDecoding, TestDelay,
         },
     };
 
     use super::{
-        client_supports_codec, peer_info, rustdesk_video_frame, serve, take_relative_chunk,
-        verify_password, ClientLimits, PendingPointerMove,
+        client_supports_codec, opus_channels, peer_info, rustdesk_video_frame, serve,
+        take_relative_chunk, verify_password, ClientLimits, PendingPointerMove,
     };
 
     #[test]
@@ -931,6 +968,31 @@ mod tests {
         assert!(limits.try_session("id:client-b".to_owned()).is_none());
         drop(second_path);
         assert!(limits.try_session("id:client-b".to_owned()).is_some());
+    }
+
+    #[test]
+    fn advertises_opus_audio_format_before_frames() {
+        assert_eq!(opus_channels(&[0x00]), 1);
+        assert_eq!(opus_channels(&[0x04]), 2);
+        let encoded = Message {
+            union: Some(message::Union::Misc(Misc {
+                union: Some(misc::Union::AudioFormat(AudioFormat {
+                    sample_rate: 48_000,
+                    channels: 2,
+                })),
+            })),
+        }
+        .encode_to_vec();
+        let decoded = Message::decode(encoded.as_slice()).expect("decode audio format");
+        match decoded.union {
+            Some(message::Union::Misc(Misc {
+                union: Some(misc::Union::AudioFormat(format)),
+            })) => {
+                assert_eq!(format.sample_rate, 48_000);
+                assert_eq!(format.channels, 2);
+            }
+            other => panic!("unexpected audio format message {other:?}"),
+        }
     }
 
     #[test]
