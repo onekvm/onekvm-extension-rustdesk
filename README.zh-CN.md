@@ -28,8 +28,8 @@ OneKVM 的设备操作系统。协议运行时消费 OneKVM 编码后的视频�
 或镜像安装，然后使用插件管理器控制扩展：
 
 ```sh
-onekvm-plugin-manager enable rustdesk
-onekvm-plugin-manager disable rustdesk
+onekvm-extension enable rustdesk
+onekvm-extension disable rustdesk
 ```
 
 RustDesk 服务默认关闭。选择 ID 服务器配置后，再从扩展设置中开启服务。

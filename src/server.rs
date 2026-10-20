@@ -474,6 +474,7 @@ pub(crate) async fn serve(
             "encoded",
             Some(&video_profile),
             Some(&client_metadata),
+            video_info.audio_available,
         ),
     )
     .await
@@ -491,6 +492,7 @@ pub(crate) async fn serve(
     let (input_shutdown_sender, mut input_shutdown) = watch::channel(false);
     let input_task = tokio::spawn(async move {
         let mut pending_move: Option<PendingPointerMove> = None;
+        let mut hid_error_reported = false;
         // A fixed cadence mirrors requestAnimationFrame more closely than
         // sleeping 16 ms after the first event: movement waits only until the
         // next frame boundary (about 8 ms on average), not a full frame.
@@ -505,6 +507,9 @@ pub(crate) async fn serve(
                 _ = flush_tick.tick() => {
                     if let Some(movement) = pending_move.take() {
                         if let Err(error) = movement.flush(&mut input).await {
+                            if keep_session_after_hid_error(&error, &mut hid_error_reported) {
+                                continue;
+                            }
                             break Err(error);
                         }
                     }
@@ -519,6 +524,9 @@ pub(crate) async fn serve(
             let Some(event) = event else {
                 if let Some(movement) = pending_move.take() {
                     if let Err(error) = movement.flush(&mut input).await {
+                        if keep_session_after_hid_error(&error, &mut hid_error_reported) {
+                            continue;
+                        }
                         break Err(error);
                     }
                 }
@@ -536,6 +544,12 @@ pub(crate) async fn serve(
                             if let Err(event) = pending.merge(event) {
                                 if let Some(movement) = pending_move.take() {
                                     if let Err(error) = movement.flush(&mut input).await {
+                                        if keep_session_after_hid_error(
+                                            &error,
+                                            &mut hid_error_reported,
+                                        ) {
+                                            continue;
+                                        }
                                         break Err(error);
                                     }
                                 }
@@ -551,10 +565,16 @@ pub(crate) async fn serve(
                     Err(event) => {
                         if let Some(movement) = pending_move.take() {
                             if let Err(error) = movement.flush(&mut input).await {
+                                if keep_session_after_hid_error(&error, &mut hid_error_reported) {
+                                    continue;
+                                }
                                 break Err(error);
                             }
                         }
                         if let Err(error) = input.handle_mouse(event).await {
+                            if keep_session_after_hid_error(&error, &mut hid_error_reported) {
+                                continue;
+                            }
                             break Err(error);
                         }
                     }
@@ -562,10 +582,16 @@ pub(crate) async fn serve(
                 InputEvent::Key(event) => {
                     if let Some(movement) = pending_move.take() {
                         if let Err(error) = movement.flush(&mut input).await {
+                            if keep_session_after_hid_error(&error, &mut hid_error_reported) {
+                                continue;
+                            }
                             break Err(error);
                         }
                     }
                     if let Err(error) = input.handle_key(event).await {
+                        if keep_session_after_hid_error(&error, &mut hid_error_reported) {
+                            continue;
+                        }
                         break Err(error);
                     }
                 }
@@ -717,6 +743,20 @@ pub(crate) async fn serve(
     let _ = input_shutdown_sender.send(true);
     let _ = input_task.await;
     result
+}
+
+fn keep_session_after_hid_error(error: &io::Error, reported: &mut bool) -> bool {
+    if matches!(
+        error.kind(),
+        io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData
+    ) {
+        return false;
+    }
+    if !*reported {
+        eprintln!("RustDesk HID temporarily unavailable; keeping media session alive: {error}");
+        *reported = true;
+    }
+    true
 }
 
 fn peer_info(video: &VideoInfo) -> PeerInfo {
@@ -946,14 +986,16 @@ mod tests {
         identity::RustDeskIdentity,
         onekvm::{Codec, Identity, MediaFrame, VideoInfo},
         protocol::{
-            login_response, message, misc, AudioFormat, Hash, LoginRequest, LoginResponse, Message,
-            Misc, MouseEvent, OptionMessage, SupportedDecoding, TestDelay,
+            key_event, login_response, message, misc, AudioFormat, Hash, KeyEvent, KeyboardMode,
+            LoginRequest, LoginResponse, Message, Misc, MouseEvent, OptionMessage,
+            SupportedDecoding, TestDelay,
         },
     };
 
     use super::{
-        client_supports_codec, opus_channels, peer_info, rustdesk_video_frame, serve,
-        take_relative_chunk, verify_password, ClientLimits, PendingPointerMove,
+        client_supports_codec, keep_session_after_hid_error, opus_channels, peer_info,
+        rustdesk_video_frame, serve, take_relative_chunk, verify_password, ClientLimits,
+        PendingPointerMove,
     };
 
     #[test]
@@ -992,6 +1034,29 @@ mod tests {
                 assert_eq!(format.channels, 2);
             }
             other => panic!("unexpected audio format message {other:?}"),
+        }
+    }
+
+    #[test]
+    fn keeps_media_alive_for_transient_hid_failures_only() {
+        let mut reported = false;
+        assert!(keep_session_after_hid_error(
+            &std::io::Error::new(std::io::ErrorKind::ConnectionReset, "USB re-enumerating"),
+            &mut reported,
+        ));
+        assert!(reported);
+
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::InvalidInput,
+            std::io::ErrorKind::InvalidData,
+        ] {
+            let mut reported = false;
+            assert!(!keep_session_after_hid_error(
+                &std::io::Error::new(kind, "fatal HID request"),
+                &mut reported,
+            ));
+            assert!(!reported);
         }
     }
 
@@ -1107,6 +1172,7 @@ mod tests {
                 width: 1920,
                 height: 1080,
                 fps: 60,
+                audio_available: true,
             });
             let encoding = info.encoding.unwrap();
             assert_eq!(encoding.h264, codec == Codec::H264);
@@ -1120,6 +1186,7 @@ mod tests {
                 height: 1080,
                 codec,
                 keyframe: true,
+                audio_available: true,
                 payload: vec![0, 0, 0, 1, 0x26].into(),
             })
             .unwrap();
@@ -1180,7 +1247,33 @@ mod tests {
             for request_index in 0..6 {
                 let (mut stream, _) = hid_listener.accept().await.unwrap();
                 let mut request = Vec::new();
-                stream.read_to_end(&mut request).await.unwrap();
+                let body_end = loop {
+                    let mut chunk = [0_u8; 512];
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert!(read > 0, "HID request closed before its body completed");
+                    request.extend_from_slice(&chunk[..read]);
+                    let Some(header_end) =
+                        request.windows(4).position(|window| window == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.strip_prefix("Content-Length: ")
+                                .and_then(|value| value.parse::<usize>().ok())
+                        })
+                        .unwrap();
+                    break header_end + 4 + content_length;
+                };
+                while request.len() < body_end {
+                    let mut chunk = [0_u8; 512];
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert!(read > 0, "HID request closed before its body completed");
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                request.truncate(body_end);
                 hid_sender.send(request).await.unwrap();
                 if request_index == 0 {
                     let _ = hid_response_receiver.take().unwrap().await;
@@ -1454,6 +1547,19 @@ mod tests {
     async fn direct_ip_media_survives_concurrent_control_messages() {
         let address = std::env::var("RUSTDESK_TEST_DIRECT").unwrap();
         let password = std::env::var("RUSTDESK_TEST_PASSWORD").unwrap();
+        let target_frames = std::env::var("RUSTDESK_TEST_FRAMES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(120);
+        let control_interval_ms = std::env::var("RUSTDESK_TEST_CONTROL_INTERVAL_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(10);
+        let test_keycodes = std::env::var("RUSTDESK_TEST_XORG_KEYCODES")
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|value| value.trim().parse::<u32>().ok())
+            .collect::<Vec<_>>();
         let mut stream = TcpStream::connect(address).await.unwrap();
         let challenge: Message = read_message(&mut stream).await.unwrap();
         let Some(message::Union::Hash(hash)) = challenge.union else {
@@ -1504,7 +1610,27 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            for sequence in 0..1_000_i64 {
+            for keycode in test_keycodes {
+                for down in [true, false] {
+                    writer
+                        .write(&Message {
+                            union: Some(message::Union::KeyEvent(KeyEvent {
+                                down,
+                                union: Some(key_event::Union::Chr(keycode)),
+                                mode: KeyboardMode::Map.into(),
+                                ..Default::default()
+                            })),
+                        })
+                        .await
+                        .unwrap();
+                    time::sleep(Duration::from_millis(40)).await;
+                }
+            }
+            // Keep the control half open for the whole 20-second media
+            // assertion. A short finite burst used to drop this write half
+            // first and manufacture an EOF when the target was deliberately
+            // waiting for an IDR after a queue gap.
+            for sequence in 0..10_000_i64 {
                 writer
                     .write(&Message {
                         union: Some(message::Union::TestDelay(TestDelay {
@@ -1515,24 +1641,32 @@ mod tests {
                     })
                     .await
                     .unwrap();
-                time::sleep(Duration::from_millis(5)).await;
+                time::sleep(Duration::from_millis(control_interval_ms)).await;
             }
         });
-        let frames = time::timeout(Duration::from_secs(20), async {
+        let (frames, audio_frames) = time::timeout(Duration::from_secs(20), async {
             let mut frames = 0;
-            while frames < 120 {
+            let mut audio_frames = 0;
+            let mut audio_format = false;
+            while frames < target_frames || audio_frames == 0 || !audio_format {
                 let message: Message = reader.read().await.unwrap();
-                if matches!(message.union, Some(message::Union::VideoFrame(_))) {
-                    frames += 1;
+                match message.union {
+                    Some(message::Union::VideoFrame(_)) => frames += 1,
+                    Some(message::Union::AudioFrame(_)) => audio_frames += 1,
+                    Some(message::Union::Misc(Misc {
+                        union: Some(misc::Union::AudioFormat(_)),
+                    })) => audio_format = true,
+                    _ => {}
                 }
             }
-            frames
+            (frames, audio_frames)
         })
         .await
-        .expect("target did not sustain the video stream");
+        .expect("target did not sustain video and audio streams");
         writer_task.abort();
         let _ = writer_task.await;
-        assert_eq!(frames, 120);
+        assert!(frames >= target_frames);
+        assert!(audio_frames > 0);
     }
 
     fn password_hash(password: &str, hash: &Hash) -> Vec<u8> {

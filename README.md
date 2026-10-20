@@ -32,8 +32,8 @@ The package name is `onekvm-extension-rustdesk`. Install it through your
 OneKVM distribution package or image, then manage it with the plugin manager:
 
 ```sh
-onekvm-plugin-manager enable rustdesk
-onekvm-plugin-manager disable rustdesk
+onekvm-extension enable rustdesk
+onekvm-extension disable rustdesk
 ```
 
 The RustDesk service is off by default. Enable it in the extension settings

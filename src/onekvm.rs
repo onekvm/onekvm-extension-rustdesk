@@ -22,6 +22,8 @@ const MEDIA_MAGIC: &[u8; 4] = b"OKVF";
 const MEDIA_VERSION: u8 = 1;
 const MEDIA_HEADER_LENGTH: usize = 40;
 const MAX_MEDIA_PAYLOAD: usize = 8 << 20;
+const INFO_FLAG_AUDIO_AVAILABLE: u8 = 1 << 0;
+const INFO_FLAG_VALID: u8 = 1 << 7;
 const RING_MAGIC: &[u8; 4] = b"OKVR";
 const RING_HANDSHAKE: u8 = b'R';
 const RING_VERSION: u32 = 1;
@@ -75,6 +77,7 @@ pub struct VideoInfo {
     pub width: u16,
     pub height: u16,
     pub fps: u32,
+    pub audio_available: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,6 +109,7 @@ pub struct MediaFrame {
     pub height: u16,
     pub codec: Codec,
     pub keyframe: bool,
+    pub audio_available: bool,
     pub payload: Bytes,
 }
 
@@ -164,15 +168,33 @@ impl MediaSubscriber {
         video: &str,
         profile: Option<&VideoProfile>,
         client: Option<&ClientMetadata<'_>>,
+        audio_enabled: bool,
     ) -> io::Result<Self> {
         if video != "info" {
-            if let Ok(subscriber) =
-                Self::connect_transport(socket_path, identity, video, profile, client, true).await
+            if let Ok(subscriber) = Self::connect_transport(
+                socket_path,
+                identity,
+                video,
+                profile,
+                client,
+                audio_enabled,
+                true,
+            )
+            .await
             {
                 return Ok(subscriber);
             }
         }
-        Self::connect_transport(socket_path, identity, video, profile, client, false).await
+        Self::connect_transport(
+            socket_path,
+            identity,
+            video,
+            profile,
+            client,
+            audio_enabled,
+            false,
+        )
+        .await
     }
 
     async fn connect_transport(
@@ -181,6 +203,7 @@ impl MediaSubscriber {
         video: &str,
         profile: Option<&VideoProfile>,
         client: Option<&ClientMetadata<'_>>,
+        audio_enabled: bool,
         shared_ring: bool,
     ) -> io::Result<Self> {
         let mut stream = UnixStream::connect(socket_path).await?;
@@ -217,7 +240,7 @@ impl MediaSubscriber {
             gop: (!metadata_only)
                 .then(|| profile.and_then(|value| (value.gop != 0).then_some(value.gop)))
                 .flatten(),
-            audio: (!metadata_only && video == "encoded").then_some("opus"),
+            audio: (!metadata_only && video == "encoded" && audio_enabled).then_some("opus"),
             transport: shared_ring.then_some("shm-ring-v1"),
             client_ip: client.map(|value| value.ip),
             client_user: client.and_then(|value| value.user),
@@ -239,31 +262,43 @@ impl MediaSubscriber {
             ring,
             legacy_prefix,
             last_sequence: 0,
-            waiting_for_keyframe: shared_ring,
+            // A newly attached decoder must never start from an arbitrary P
+            // frame. This also applies to the legacy OKVF fallback used by
+            // the Rust broker while shm-ring-v1 is being migrated.
+            waiting_for_keyframe: !metadata_only,
         };
-        if shared_ring {
+        if !metadata_only {
             let _ = subscriber.request_key_frame().await;
         }
         Ok(subscriber)
     }
 
     pub async fn read_frame(&mut self) -> io::Result<MediaFrame> {
-        if self.ring.is_none() {
-            return read_media_frame_prefixed(&mut self.stream, self.legacy_prefix.take()).await;
-        }
         loop {
-            let ring = Arc::clone(self.ring.as_ref().expect("ring checked above"));
-            let Some(frame) = take_next_frame(Arc::clone(&ring))? else {
-                wait_for_ring(&self.stream, &ring).await?;
-                continue;
+            let shared_ring = self.ring.is_some();
+            let frame = if let Some(ring) = self.ring.as_ref().map(Arc::clone) {
+                let Some(frame) = take_next_frame(Arc::clone(&ring))? else {
+                    wait_for_ring(&self.stream, &ring).await?;
+                    continue;
+                };
+                frame
+            } else {
+                read_media_frame_prefixed(&mut self.stream, self.legacy_prefix.take()).await?
             };
-            if frame.codec == Codec::Opus {
+
+            // Shared-ring Opus deliberately has sequence zero and does not
+            // participate in the video GOP sequence. Legacy OKVF uses one
+            // combined sequence, so audio must advance last_sequence there.
+            if shared_ring && frame.codec == Codec::Opus {
                 return Ok(frame);
             }
             if self.last_sequence != 0 && frame.sequence != self.last_sequence + 1 {
                 self.waiting_for_keyframe = true;
             }
             self.last_sequence = frame.sequence;
+            if frame.codec == Codec::Opus {
+                return Ok(frame);
+            }
             if self.waiting_for_keyframe {
                 if !frame.keyframe {
                     let _ = self.request_key_frame().await;
@@ -577,6 +612,7 @@ fn take_next_frame(ring: Arc<SharedRing>) -> io::Result<Option<MediaFrame>> {
                 height,
                 codec,
                 keyframe,
+                audio_available: true,
                 payload: Bytes::from(payload),
             }));
         }
@@ -601,6 +637,7 @@ fn take_next_frame(ring: Arc<SharedRing>) -> io::Result<Option<MediaFrame>> {
             height,
             codec,
             keyframe,
+            audio_available: true,
             payload,
         }));
     }
@@ -711,6 +748,8 @@ where
         height: u16::from_be_bytes(header[30..32].try_into().unwrap()),
         codec,
         keyframe: header[6] & 1 != 0,
+        audio_available: header[7] & INFO_FLAG_VALID == 0
+            || header[7] & INFO_FLAG_AUDIO_AVAILABLE != 0,
         payload: payload.into(),
     })
 }
@@ -721,7 +760,7 @@ pub async fn query_video_info(
     profile: &VideoProfile,
 ) -> io::Result<VideoInfo> {
     let mut subscriber =
-        MediaSubscriber::connect(socket_path, identity, "info", Some(profile), None).await?;
+        MediaSubscriber::connect(socket_path, identity, "info", Some(profile), None, false).await?;
     let frame = subscriber.read_frame().await?;
     if !frame.payload.is_empty()
         || frame.width == 0
@@ -738,6 +777,7 @@ pub async fn query_video_info(
         width: frame.width,
         height: frame.height,
         fps: (1_000_000_u32 / frame.duration_usec).max(1),
+        audio_available: frame.audio_available,
     })
 }
 
@@ -808,7 +848,6 @@ impl HidClient {
         );
         stream.write_all(headers.as_bytes()).await?;
         stream.write_all(&body).await?;
-        stream.shutdown().await?;
         let mut response = Vec::with_capacity(512);
         stream.read_to_end(&mut response).await?;
         let status_line = response
@@ -818,18 +857,60 @@ impl HidClient {
         if status_line.starts_with(b"HTTP/1.1 2") || status_line.starts_with(b"HTTP/1.0 2") {
             return Ok(());
         }
+        let body = response
+            .windows(4)
+            .position(|part| part == b"\r\n\r\n")
+            .map(|offset| &response[offset + 4..])
+            .unwrap_or_default();
         Err(io::Error::other(format!(
-            "OneKVM HID request failed: {}",
-            String::from_utf8_lossy(status_line).trim()
+            "OneKVM HID request failed: {}{}",
+            String::from_utf8_lossy(status_line).trim(),
+            if body.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", String::from_utf8_lossy(body).trim())
+            }
         )))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use tokio::io::{duplex, AsyncWriteExt};
+    use bytes::Bytes;
+    use tokio::{
+        io::{duplex, AsyncReadExt, AsyncWriteExt},
+        net::UnixStream,
+        time::{timeout, Duration},
+    };
 
-    use super::{read_media_frame, Codec, MEDIA_HEADER_LENGTH};
+    use super::{read_media_frame, Codec, MediaSubscriber, INFO_FLAG_VALID, MEDIA_HEADER_LENGTH};
+
+    fn encoded_frame(sequence: u64, keyframe: bool) -> Vec<u8> {
+        let payload = [0, 0, 0, 1, if keyframe { 0x65 } else { 0x41 }];
+        let mut frame = vec![0_u8; MEDIA_HEADER_LENGTH + payload.len()];
+        frame[..4].copy_from_slice(b"OKVF");
+        frame[4] = 1;
+        frame[5] = 1;
+        frame[6] = u8::from(keyframe);
+        frame[8..16].copy_from_slice(&sequence.to_be_bytes());
+        frame[16..24].copy_from_slice(&123_i64.to_be_bytes());
+        frame[24..28].copy_from_slice(&16_667_u32.to_be_bytes());
+        frame[28..30].copy_from_slice(&1920_u16.to_be_bytes());
+        frame[30..32].copy_from_slice(&1080_u16.to_be_bytes());
+        frame[32..36].copy_from_slice(&(payload.len() as u32).to_be_bytes());
+        frame[MEDIA_HEADER_LENGTH..].copy_from_slice(&payload);
+        frame
+    }
+
+    fn legacy_subscriber(stream: UnixStream, last_sequence: u64, waiting: bool) -> MediaSubscriber {
+        MediaSubscriber {
+            stream,
+            ring: None,
+            legacy_prefix: None,
+            last_sequence,
+            waiting_for_keyframe: waiting,
+        }
+    }
 
     #[tokio::test]
     async fn parses_media_frame() {
@@ -850,7 +931,24 @@ mod tests {
         assert_eq!(frame.codec, Codec::H264);
         assert_eq!((frame.width, frame.height), (1920, 1080));
         assert!(frame.keyframe);
+        assert!(frame.audio_available);
         assert_eq!(frame.duration_usec, 16_667);
+    }
+
+    #[tokio::test]
+    async fn parses_disabled_audio_metadata_flag() {
+        let (mut writer, mut reader) = duplex(1024);
+        let mut header = [0_u8; MEDIA_HEADER_LENGTH];
+        header[..4].copy_from_slice(b"OKVF");
+        header[4] = 1;
+        header[5] = 1;
+        header[7] = INFO_FLAG_VALID;
+        header[24..28].copy_from_slice(&16_667_u32.to_be_bytes());
+        header[28..30].copy_from_slice(&1920_u16.to_be_bytes());
+        header[30..32].copy_from_slice(&1080_u16.to_be_bytes());
+        writer.write_all(&header).await.unwrap();
+        let frame = read_media_frame(&mut reader).await.unwrap();
+        assert!(!frame.audio_available);
     }
 
     #[tokio::test]
@@ -869,5 +967,44 @@ mod tests {
         assert_eq!((frame.width, frame.height), (0, 0));
         assert_eq!(frame.duration_usec, 20_000);
         assert_eq!(frame.payload.as_ref(), &[0xfc, 0x01, 0x02]);
+    }
+
+    #[tokio::test]
+    async fn legacy_subscriber_waits_for_initial_keyframe() {
+        let (stream, mut producer) = UnixStream::pair().unwrap();
+        let mut subscriber = legacy_subscriber(stream, 0, true);
+        producer.write_all(&encoded_frame(1, false)).await.unwrap();
+        producer.write_all(&encoded_frame(2, true)).await.unwrap();
+
+        let frame = timeout(Duration::from_secs(1), subscriber.read_frame())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame.sequence, 2);
+        assert!(frame.keyframe);
+        assert_eq!(frame.payload, Bytes::from_static(&[0, 0, 0, 1, 0x65]));
+
+        let mut request = vec![0_u8; b"{\"request\":\"keyframe\"}\n".len()];
+        producer.read_exact(&mut request).await.unwrap();
+        assert_eq!(request, b"{\"request\":\"keyframe\"}\n");
+    }
+
+    #[tokio::test]
+    async fn legacy_subscriber_recovers_sequence_gap_at_keyframe() {
+        let (stream, mut producer) = UnixStream::pair().unwrap();
+        let mut subscriber = legacy_subscriber(stream, 10, false);
+        producer.write_all(&encoded_frame(12, false)).await.unwrap();
+        producer.write_all(&encoded_frame(13, true)).await.unwrap();
+
+        let frame = timeout(Duration::from_secs(1), subscriber.read_frame())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame.sequence, 13);
+        assert!(frame.keyframe);
+
+        let mut request = vec![0_u8; b"{\"request\":\"keyframe\"}\n".len()];
+        producer.read_exact(&mut request).await.unwrap();
+        assert_eq!(request, b"{\"request\":\"keyframe\"}\n");
     }
 }

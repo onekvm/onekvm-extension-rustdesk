@@ -151,6 +151,24 @@ impl InputState {
             return Ok(());
         }
 
+        if let Some(key_event::Union::Seq(sequence)) = &event.union {
+            if mode == KeyboardMode::Translate && (event.down || event.press) {
+                // Translate sequences are logical text, not physical Linux
+                // keycodes. RustDesk sends a sequence only on key-down and
+                // expects the receiver to release Shift before typing it.
+                // Keep Ctrl/Alt/Meta so translated shortcuts still work.
+                self.modifiers &= !(0x02 | 0x20);
+                for character in sequence.chars() {
+                    let (usage, implied_modifier) = char_to_hid(Some(character));
+                    if let Some(usage) = usage {
+                        self.apply_usage(usage, false, true, implied_modifier)
+                            .await?;
+                    }
+                }
+                return Ok(());
+            }
+        }
+
         let (usage, implied_modifier) = match event.union {
             Some(key_event::Union::Chr(value))
                 if matches!(mode, KeyboardMode::Map | KeyboardMode::Translate) =>
@@ -201,6 +219,7 @@ impl InputState {
         press: bool,
         implied_modifier: u8,
     ) -> std::io::Result<()> {
+        let previous_modifiers = self.modifiers;
         if down || press {
             self.modifiers |= implied_modifier;
             self.keys.insert(usage);
@@ -211,7 +230,7 @@ impl InputState {
         }
         if press {
             self.keys.remove(&usage);
-            self.modifiers &= !implied_modifier;
+            self.modifiers = previous_modifiers;
             self.send_keyboard().await?;
         }
         Ok(())
@@ -407,11 +426,28 @@ fn linux_xorg_keycode_to_hid(value: u32) -> Option<HidKey> {
         13 => 0x2e,
         14 => 0x2a,
         15 => 0x2b,
-        16..=25 => 0x14 + (evdev - 16) as u8,
+        16 => 0x14,
+        17 => 0x1a,
+        18 => 0x08,
+        19 => 0x15,
+        20 => 0x17,
+        21 => 0x1c,
+        22 => 0x18,
+        23 => 0x0c,
+        24 => 0x12,
+        25 => 0x13,
         26 => 0x2f,
         27 => 0x30,
         28 => 0x28,
-        30..=38 => 0x04 + (evdev - 30) as u8,
+        30 => 0x04,
+        31 => 0x16,
+        32 => 0x07,
+        33 => 0x09,
+        34 => 0x0a,
+        35 => 0x0b,
+        36 => 0x0d,
+        37 => 0x0e,
+        38 => 0x0f,
         39 => 0x33,
         40 => 0x34,
         41 => 0x35,
@@ -477,6 +513,10 @@ mod tests {
     #[test]
     fn maps_xorg_keycodes() {
         assert_eq!(linux_xorg_keycode_to_hid(38), Some(HidKey::Usage(0x04)));
+        assert_eq!(linux_xorg_keycode_to_hid(39), Some(HidKey::Usage(0x16)));
+        assert_eq!(linux_xorg_keycode_to_hid(25), Some(HidKey::Usage(0x1a)));
+        assert_eq!(linux_xorg_keycode_to_hid(29), Some(HidKey::Usage(0x1c)));
+        assert_eq!(linux_xorg_keycode_to_hid(52), Some(HidKey::Usage(0x1d)));
         assert_eq!(linux_xorg_keycode_to_hid(36), Some(HidKey::Usage(0x28)));
         assert_eq!(linux_xorg_keycode_to_hid(94), Some(HidKey::Usage(0x64)));
     }
