@@ -2,7 +2,7 @@ SUMMARY = "OneKVM RustDesk ID, relay, and direct-IP protocol extension"
 LICENSE = "AGPL-3.0-only"
 LIC_FILES_CHKSUM = "file://LICENSE;md5=4ae09d45eac4aa08d013b5f2e01c67f6"
 PV = "0.1.17"
-PR = "r4"
+PR = "r5"
 
 ONEKVM_COMPONENT_GIT_URI ??= "git://github.com/onekvm/onekvm-extension-rustdesk.git;protocol=https;branch=main"
 ONEKVM_COMPONENT_SRCREV ??= ""
