@@ -14,17 +14,45 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      update: ${{ steps.release.outputs.update }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Check the upstream release through GitHub API
+        id: release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          latest="$(gh api repos/rustdesk/rustdesk/releases/latest --jq '.tag_name')"
+          content="$(gh api "repos/${GITHUB_REPOSITORY}/contents/.github/rustdesk-upstream-version?ref=main" --jq '.content' | tr -d '\n' | base64 --decode)"
+          current="$(printf '%s\n' "$content" | tr -d '[:space:]')"
+          test -n "$current"
+          echo "RustDesk: $current -> $latest"
+          echo "version=$latest" >> "$GITHUB_OUTPUT"
+          if [[ "$current" == "$latest" ]]; then
+            echo "update=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "update=true" >> "$GITHUB_OUTPUT"
+          fi
+
   update:
+    needs: check
+    if: needs.check.outputs.update == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Check out the extension
         uses: actions/checkout@v4
 
-      - name: Check and update the upstream release marker
+      - name: Update the upstream release marker
         id: update
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          UPSTREAM_VERSION: ${{ needs.check.outputs.version }}
         run: python3 scripts/check-rustdesk-version.py --update
 
       - name: Open a pull request for a new release
@@ -34,8 +62,8 @@ jobs:
           base: main
           branch: automation/rustdesk-version
           delete-branch: true
-          commit-message: "ci(rustdesk): track upstream release ${{ steps.update.outputs.version }}"
-          title: "ci(rustdesk): track upstream release ${{ steps.update.outputs.version }}"
+          commit-message: "ci(rustdesk): track upstream release ${{ needs.check.outputs.version }}"
+          title: "ci(rustdesk): track upstream release ${{ needs.check.outputs.version }}"
           body: |
             This pull request was opened by the daily RustDesk release check.
 
