@@ -1,0 +1,42 @@
+name: Check RustDesk release
+
+on:
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: rustdesk-version-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the extension
+        uses: actions/checkout@v4
+
+      - name: Check and update the upstream release marker
+        id: update
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/check-rustdesk-version.py --update
+
+      - name: Open a pull request for a new release
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ github.token }}
+          base: main
+          branch: automation/rustdesk-version
+          delete-branch: true
+          commit-message: "ci(rustdesk): track upstream release ${{ steps.update.outputs.version }}"
+          title: "ci(rustdesk): track upstream release ${{ steps.update.outputs.version }}"
+          body: |
+            This pull request was opened by the daily RustDesk release check.
+
+            It records the latest upstream RustDesk release for compatibility review. This repository does not pin or package the RustDesk client itself, so the extension recipe and protocol implementation are left unchanged.
